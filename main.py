@@ -2,13 +2,16 @@ import os
 import random
 import discord
 from discord.ext import commands
+from dotenv import load_dotenv
 from yt_dlp import YoutubeDL
 from collections import deque
 import asyncio
 from keep_alive import keep_alive
 
+load_dotenv()
+
 # Configuration
-TOKEN = os.getenv("DISCORD_TOKEN")
+TOKEN = os.getenv("TOKEN")
 DEFAULT_PLAYLIST = [
     "more than you know", "takeaway chainsmokers", "12 notes", "hana ni natte",
     "akuma no ko", "your name little glee monster", "lisa gurenge",
@@ -260,10 +263,13 @@ async def help(ctx):
 
 
 # Start the keep_alive server (for Replit)
-keep_alive()
-print(
-    f"🌐 Web server URL: https://{os.environ['REPL_SLUG']}.{os.environ['REPL_OWNER']}.repl.co"
-)
+# keep_alive()
+
+# print(
+#     f"🌐 Web server URL: https://{os.environ['REPL_SLUG']}.{os.environ['REPL_OWNER']}.repl.co"
+# )
+
+print(f"TOKEN loaded: {bool(TOKEN)}")
 
 try:
     bot.run(TOKEN)
