@@ -263,7 +263,7 @@ async def help(ctx):
 
 
 # Start the keep_alive server (for Replit)
-# keep_alive()
+keep_alive()
 
 # print(
 #     f"🌐 Web server URL: https://{os.environ['REPL_SLUG']}.{os.environ['REPL_OWNER']}.repl.co"
