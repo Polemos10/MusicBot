@@ -28,7 +28,7 @@ DEFAULT_PLAYLIST = [
 if 'COOKIES' in os.environ:
     try:
         with open('cookies.txt', 'wb') as f:
-            f.write(base64.b64decode(os.environ['COOKIES_BASE64']))
+            f.write(base64.b64decode(os.environ['COOKIES']))
         print("✅ Successfully created cookies.txt from environment variable")
     except Exception as e:
         print(f"❌ Error creating cookies.txt: {e}")
