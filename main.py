@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from yt_dlp import YoutubeDL
 from collections import deque
 import asyncio
+import base64
 from keep_alive import keep_alive
 
 load_dotenv()
@@ -23,6 +24,17 @@ DEFAULT_PLAYLIST = [
     "the motto alban chela", "voices damiano david", "firestone kygo"
 ]
 
+# Create cookies.txt from environment variable if it exists
+if 'COOKIES' in os.environ:
+    try:
+        with open('cookies.txt', 'wb') as f:
+            f.write(base64.b64decode(os.environ['COOKIES_BASE64']))
+        print("✅ Successfully created cookies.txt from environment variable")
+    except Exception as e:
+        print(f"❌ Error creating cookies.txt: {e}")
+elif not os.path.exists('cookies.txt'):
+    print("⚠ Warning: cookies.txt not found. Some YouTube videos may not play.")
+
 # Bot setup
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
@@ -35,8 +47,7 @@ should_replay = False
 
 # Audio configuration
 FFMPEG_OPTIONS = {
-    'before_options':
-    '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     'options': '-vn -af "loudnorm=I=-16:LRA=11:TP=-1.5"',
     'executable': 'ffmpeg'
 }
@@ -55,6 +66,12 @@ YDL_OPTIONS = {
     }
 }
 
+# Add cookies to YDL options if file exists
+if os.path.exists('cookies.txt'):
+    YDL_OPTIONS['cookiefile'] = 'cookies.txt'
+    print("✅ Using cookies.txt for YouTube authentication")
+else:
+    print("⚠ Proceeding without YouTube cookies - some videos may not play")
 
 @bot.event
 async def on_ready():
@@ -62,66 +79,80 @@ async def on_ready():
     await bot.change_presence(activity=discord.Activity(
         type=discord.ActivityType.listening, name="!help"))
 
-
 async def extract_audio_info(query):
-    """Handle both searches and direct URLs"""
-    with YoutubeDL(YDL_OPTIONS) as ydl:
-        try:
-            info = ydl.extract_info(
-                f"ytsearch:{query}" if not query.startswith(
-                    ('http://', 'https://')) else query,
-                download=False)
-
+    """Handle both searches and direct URLs with error handling"""
+    ydl_opts = YDL_OPTIONS.copy()
+    ydl_opts['noplaylist'] = True
+    
+    try:
+        # Add delay to prevent rate limiting
+        await asyncio.sleep(1)
+        
+        with YoutubeDL(ydl_opts) as ydl:
+            info = await bot.loop.run_in_executor(
+                None,
+                lambda: ydl.extract_info(
+                    f"ytsearch:{query}" if not query.startswith(('http://', 'https://')) else query,
+                    download=False
+                )
+            )
+            
             if not info:
+                print(f"❌ No info found for query: {query}")
                 return None
-
-            entry = info['entries'][0] if 'entries' in info else info
+                
+            if 'entries' in info:
+                entry = info['entries'][0] if info['entries'] else None
+            else:
+                entry = info
+                
+            if not entry:
+                print(f"❌ No valid entries for query: {query}")
+                return None
+                
             return {
                 'url': entry['url'],
                 'title': entry.get('title', query),
                 'query': query
             }
-        except Exception as e:
-            print(f"Extraction error: {e}")
-            return None
-
+    except Exception as e:
+        print(f"❌ Extraction error for '{query}': {e}")
+        return None
 
 async def play_next(ctx):
     global current_track, is_paused, should_replay
-
-    if should_replay and current_track:
-        track = current_track
-        should_replay = False
-    elif song_queue:
-        next_query = song_queue.popleft()
-        track = await extract_audio_info(next_query)
-    else:
-        return  # Queue is empty
-
-    if not track or not track.get('url'):
-        await ctx.send("❌ Couldn't play track")
+    
+    while song_queue:
+        if should_replay and current_track:
+            track = current_track
+            should_replay = False
+        else:
+            next_query = song_queue.popleft()
+            track = await extract_audio_info(next_query)
+            if not track:
+                await ctx.send(f"❌ Couldn't play: {next_query}")
+                continue
+                
+        current_track = track
+        player = discord.FFmpegPCMAudio(track['url'], **FFMPEG_OPTIONS)
+        
+        def after_playing(error):
+            if error:
+                print(f"Playback error: {error}")
+            asyncio.run_coroutine_threadsafe(play_next(ctx), bot.loop)
+        
+        ctx.voice_client.play(player, after=after_playing)
+        await ctx.send(f"🎶 Now playing: **{track['title']}**")
         return
-
-    current_track = track
-    player = discord.FFmpegPCMAudio(track['url'], **FFMPEG_OPTIONS)
-
-    def after_playing(error):
-        if error:
-            print(f"Playback error: {error}")
-        asyncio.run_coroutine_threadsafe(play_next(ctx), bot.loop)
-
-    ctx.voice_client.play(player, after=after_playing)
-    await ctx.send(f"🎶 Now playing: **{track['title']}**")
-
 
 @bot.command()
 async def play(ctx, *, query=None):
     """Play music or resume playback"""
     global is_paused
-
+    
     if not ctx.author.voice:
         return await ctx.send("⚠ Join a voice channel first!")
-
+    
     if ctx.voice_client and is_paused:
         ctx.voice_client.resume()
         is_paused = False
@@ -138,31 +169,28 @@ async def play(ctx, *, query=None):
         song_queue.extend(songs)
         await ctx.send(f"🔀 Shuffled {len(songs)} default songs!")
     else:
-        songs = [s.strip()
-                 for s in query.split(',')] if ',' in query else [query]
+        songs = [s.strip() for s in query.split(',')] if ',' in query else [query]
         song_queue.extend(songs)
         await ctx.send(f"📥 Added {len(songs)} songs to queue!")
 
     if not ctx.voice_client.is_playing() and not is_paused:
         await play_next(ctx)
 
-
 @bot.command()
 async def replay(ctx):
     """Replay the current track"""
     global should_replay
-
+    
     if not ctx.voice_client or not current_track:
         await ctx.send("❌ No track is currently playing")
         return
-
+        
     if ctx.voice_client.is_playing():
         ctx.voice_client.stop()
-
+        
     should_replay = True
     await play_next(ctx)
     await ctx.send("🔂 Replaying current track")
-
 
 @bot.command()
 async def pause(ctx):
@@ -175,7 +203,6 @@ async def pause(ctx):
     else:
         await ctx.send("❌ Nothing is playing!")
 
-
 @bot.command()
 async def resume(ctx):
     """Resume playback"""
@@ -187,7 +214,6 @@ async def resume(ctx):
     else:
         await ctx.send("❌ Playback not paused!")
 
-
 @bot.command()
 async def skip(ctx):
     """Skip current song"""
@@ -196,7 +222,6 @@ async def skip(ctx):
         await ctx.send("⏭ Skipped current song")
     else:
         await ctx.send("❌ Nothing to skip!")
-
 
 @bot.command()
 async def stop(ctx):
@@ -212,18 +237,20 @@ async def stop(ctx):
     else:
         await ctx.send("❌ Not in a voice channel!")
 
-
 @bot.command()
 async def queue(ctx):
     """Show current queue"""
     if not song_queue:
         return await ctx.send("Queue is empty!")
-
-    queue_list = "\n".join(f"{i+1}. {song[:50]}{'...' if len(song)>50 else ''}"
-                           for i, song in enumerate(list(song_queue)[:10]))
-    extra = "\n..." if len(song_queue) > 10 else ""
-    await ctx.send(f"🎧 Upcoming (next 10):\n{queue_list}{extra}")
-
+    
+    queue_list = "\n".join(
+        f"{i+1}. {song[:50]}{'...' if len(song)>50 else ''}" 
+        for i, song in enumerate(list(song_queue)[:10])
+    )
+    await ctx.send(
+        f"🎧 Upcoming (next 10):\n{queue_list}"
+        f"{'\n...' if len(song_queue)>10 else ''}"
+    )
 
 @bot.command()
 async def np(ctx):
@@ -233,43 +260,37 @@ async def np(ctx):
     else:
         await ctx.send("❌ Nothing is playing")
 
-
 @bot.command()
 async def ping(ctx):
     """Check bot latency"""
     latency = round(bot.latency * 1000)
-    return await ctx.send(f"🏓 Pong! Latency: {latency}ms")
-
+    await ctx.send(f"🏓 Pong! Latency: {latency}ms")
 
 @bot.command()
 async def help(ctx):
     """Show all commands"""
     embed = discord.Embed(title="🎵 Music Bot Commands", color=0x1DB954)
-    commands_info = [("!play [song]", "Play or queue songs"),
-                     ("!play song1, song2", "Queue multiple songs"),
-                     ("!replay", "Replay current track"),
-                     ("!pause", "Pause playback"),
-                     ("!resume", "Resume playback"),
-                     ("!skip", "Skip current song"),
-                     ("!stop", "Stop and clear queue"),
-                     ("!queue", "Show current queue"),
-                     ("!np", "Now playing info"),
-                     ("!help", "Show this message")]
-
+    commands_info = [
+        ("!play [song]", "Play or queue songs"),
+        ("!play song1, song2", "Queue multiple songs"),
+        ("!replay", "Replay current track"),
+        ("!pause", "Pause playback"),
+        ("!resume", "Resume playback"),
+        ("!skip", "Skip current song"),
+        ("!stop", "Stop and clear queue"),
+        ("!queue", "Show current queue"),
+        ("!np", "Now playing info"),
+        ("!ping", "Check bot latency"),
+        ("!help", "Show this message")
+    ]
+    
     for name, value in commands_info:
         embed.add_field(name=name, value=value, inline=False)
-
+    
     await ctx.send(embed=embed)
-
 
 # Start the keep_alive server (for Replit)
 keep_alive()
-
-# print(
-#     f"🌐 Web server URL: https://{os.environ['REPL_SLUG']}.{os.environ['REPL_OWNER']}.repl.co"
-# )
-
-print(f"TOKEN loaded: {bool(TOKEN)}")
 
 try:
     bot.run(TOKEN)
